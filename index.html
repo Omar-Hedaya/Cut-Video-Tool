@@ -13,8 +13,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     
-    <!-- تحميل محرك FFmpeg.wasm الإصدار 0.11.6 أحادي الخيط ليعمل بدون الحاجة لـ SharedArrayBuffer -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+    <!-- تحميل مكتبة FFmpeg الإصدار 0.12.6 ومكتبة الأدوات المساعدة -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd/ffmpeg.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js" crossorigin="anonymous"></script>
 
     <script>
         tailwind.config = {
@@ -463,10 +464,10 @@
         // =========================================================================
         // 1. تعريف عناصر الواجهة والمتغيرات العامة
         // =========================================================================
-        const { createFFmpeg, fetchFile } = FFmpeg;
         let ffmpeg = null;
         let isFFmpegLoaded = false;
         let selectedFile = null;
+        let videoObjectUrl = null;
         let videoDuration = 0;
         let startTime = 0;
         let endTime = 0;
@@ -562,7 +563,7 @@
                 toast.style.opacity = '0';
                 toast.style.transform = 'translateY(-10px)';
                 setTimeout(() => toast.remove(), 300);
-            }, 4000);
+            }, 4500);
         }
 
         function formatBytes(bytes) {
@@ -611,8 +612,19 @@
             }
         }
 
+        // تحويل الملفات البعيدة إلى Blob URL محلي لتجاوز قيود Cross-Origin Worker في GitHub Pages
+        async function createLocalBlobURL(url, mimeType) {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`فشل تحميل ملف المحرك: ${response.status}`);
+            }
+            const blob = await response.blob();
+            const typedBlob = new Blob([blob], { type: mimeType });
+            return URL.createObjectURL(typedBlob);
+        }
+
         // =========================================================================
-        // 3. إدارة اختيار الملف والخط الزمني (Timeline)
+        // 3. إدارة اختيار الملف والخط الزمني (عرض فوري بدون استهلاك RAM)
         // =========================================================================
         videoInput.addEventListener('change', (e) => {
             if (e.target.files && e.target.files[0]) {
@@ -645,27 +657,55 @@
                 URL.revokeObjectURL(outputBlobUrl);
                 outputBlobUrl = null;
             }
+            if (videoObjectUrl) {
+                URL.revokeObjectURL(videoObjectUrl);
+                videoObjectUrl = null;
+            }
+
             resultSection.classList.add('hidden');
-            editorSection.classList.add('hidden');
+            progressSection.classList.add('hidden');
 
-            // إظهار شريط التقدم فوراً أثناء استيراد وقراءة بيانات الفيديو في المتصفح
-            const loadStartPerf = performance.now();
-            startElapsedTimer(loadStartPerf);
-            progressSection.classList.remove('hidden');
-            updateProgressUI(20, 'جاري قراءة واستيراد ملف الفيديو إلى المتصفح...', 2, `الملف: ${file.name} (${formatBytes(file.size)})`);
-
-            setTimeout(() => {
-                updateProgressUI(65, 'جاري تحليل بيانات الفيديو والإطارات الزمنية...', 2);
-            }, 120);
-
-            const fileUrl = URL.createObjectURL(file);
-            videoPlayer.src = fileUrl;
+            // إنشاء رابط بث محلي مباشر (Stream URL) دون تحميل الملف كاملاً في الرام
+            videoObjectUrl = URL.createObjectURL(file);
+            videoPlayer.src = videoObjectUrl;
 
             fileNameDisplay.textContent = file.name;
             fileSizeDisplay.textContent = formatBytes(file.size);
             const extMatch = file.name.match(/\.([a-zA-Z0-9]+)$/);
             fileFormatDisplay.textContent = extMatch ? extMatch[1].toUpperCase() : 'VIDEO';
+
+            // إظهار المحرر فوراً
+            editorSection.classList.remove('hidden');
+            dropZoneSection.classList.add('hidden');
+
+            if (file.size > 500 * 1024 * 1024) {
+                showToast('تنبيه: حجم الفيديو كبير جداً (>500MB). قد يستهلك القص في المتصفح ذاكرة الهاتف.', 'info');
+            }
         }
+
+        // تهيئة أشرطة القص فور قراءة بيانات الفيديو (Metadata)
+        videoPlayer.addEventListener('loadedmetadata', () => {
+            videoDuration = videoPlayer.duration || 0;
+            startTime = 0;
+            endTime = videoDuration;
+
+            totalDurationDisplay.textContent = formatTime(videoDuration);
+            sliderMaxLabel.textContent = formatTime(videoDuration);
+
+            startRange.min = 0;
+            startRange.max = videoDuration;
+            startRange.value = 0;
+
+            endRange.min = 0;
+            endRange.max = videoDuration;
+            endRange.value = videoDuration;
+
+            startInput.max = videoDuration;
+            endInput.max = videoDuration;
+
+            updateRangeUI();
+            editorSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
 
         function updateRangeUI() {
             if (!videoDuration || videoDuration <= 0) return;
@@ -772,56 +812,74 @@
         videoPlayer.addEventListener('error', () => {
             stopElapsedTimer();
             progressSection.classList.add('hidden');
-            showToast('تعذر قراءة ملف الفيديو في المتصفح. جرب صيغة MP4.', 'error');
+            showToast('تعذر تشغيل هذا الفيديو في المتصفح. جرب صيغة MP4 قياسية.', 'error');
         });
-// ... existing code ... -->
+
         previewClipBtn.addEventListener('click', () => {
             videoPlayer.currentTime = startTime;
             isPreviewingClip = true;
             videoPlayer.play();
         });
 
-        function startElapsedTimer(startPerf) {
-// ... existing code ... -->
+        // =========================================================================
+        // 4. تهيئة محرك FFmpeg v0.12.6 (Single-Thread) عبر Blob URLs محلية
+        // =========================================================================
         async function initFFmpeg() {
             if (isFFmpegLoaded && ffmpeg) return ffmpeg;
 
             try {
+                if (!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) {
+                    throw new Error('مكتبة FFmpeg لم تكتمل، تأكد من اتصالك بالإنترنت وأعد تحديث الصفحة.');
+                }
+
                 engineDot.className = 'w-2.5 h-2.5 rounded-full bg-blue-400 animate-ping';
                 engineStatusText.textContent = 'جاري تحميل محرك القص...';
                 
                 progressSection.classList.remove('hidden');
-                updateProgressUI(12, 'جاري تحميل نواة FFmpeg.wasm في المتصفح...', 1, 'يتم تحميل المحرك (~25MB) في أول استخدام فقط وتخزينه في المتصفح.');
+                updateProgressUI(8, 'جاري تحميل ملفات نواة FFmpeg v0.12.6...', 1, 'يتم جلب النواة أحادية الخيط وتحويلها إلى Blob محلي لتجاوز قيود GitHub Pages.');
 
-                ffmpeg = createFFmpeg({
-                    log: false,
-                    corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
-                    mainName: 'main',
-                    progress: ({ ratio }) => {
-                        if (ratio >= 0 && ratio <= 1) {
-                            // ربط تقدم FFmpeg الفعلي بالمرحلة الثالثة (من 50% إلى 90%)
-                            const mappedPct = 50 + Math.round(ratio * 40);
-                            updateProgressUI(mappedPct, null, 3);
-                        }
+                const { FFmpeg } = window.FFmpegWASM;
+                ffmpeg = new FFmpeg();
+
+                ffmpeg.on('progress', ({ progress }) => {
+                    if (typeof progress === 'number' && progress >= 0 && progress <= 1) {
+                        const mappedPct = 50 + Math.round(progress * 40);
+                        updateProgressUI(mappedPct, null, 3);
                     }
                 });
 
-                await ffmpeg.load();
-                isFFmpegLoaded = true;
+                const coreBaseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const ffmpegBaseURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd';
 
+                // تحويل ملف العامل (Worker) وملفات النواة إلى روابط Blob محلية لتجاوز حظر Cross-Origin في GitHub Pages والمتصفحات
+                updateProgressUI(14, 'جاري تجهيز ملفات العامل ونواة المعالجة (Worker, Core & WASM)...', 1);
+                const [classWorkerURL, coreURL, wasmURL] = await Promise.all([
+                    createLocalBlobURL(`${ffmpegBaseURL}/814.ffmpeg.js`, 'text/javascript'),
+                    createLocalBlobURL(`${coreBaseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    createLocalBlobURL(`${coreBaseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                ]);
+
+                updateProgressUI(22, 'جاري تشغيل محرك WebAssembly في المتصفح...', 1);
+                await ffmpeg.load({
+                    classWorkerURL: classWorkerURL,
+                    coreURL: coreURL,
+                    wasmURL: wasmURL
+                });
+
+                isFFmpegLoaded = true;
                 engineDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400';
                 engineStatusText.textContent = 'المحرك نشط وجاهز';
                 return ffmpeg;
             } catch (err) {
-                console.error('FFmpeg load error:', err);
+                console.error('FFmpeg v0.12.6 load error:', err);
                 engineDot.className = 'w-2.5 h-2.5 rounded-full bg-red-500';
                 engineStatusText.textContent = 'فشل تحميل المحرك';
-                throw new Error('تعذر تحميل محرك FFmpeg. تأكد من اتصالك بالإنترنت وأعد المحاولة.');
+                throw new Error(err.message || 'تعذر تحميل محرك FFmpeg. تأكد من الاتصال بالإنترنت وأعد المحاولة.');
             }
         }
 
         // =========================================================================
-        // 4. تنفيذ عملية القص والتصدير السريع
+        // 5. تنفيذ عملية القص والتصدير السريع
         // =========================================================================
         cutBtn.addEventListener('click', async () => {
             if (!selectedFile) {
@@ -837,6 +895,7 @@
             cutBtn.classList.add('opacity-60', 'cursor-not-allowed');
             resultSection.classList.add('hidden');
             progressSection.classList.remove('hidden');
+            progressSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
             const startPerf = performance.now();
             startElapsedTimer(startPerf);
@@ -845,17 +904,24 @@
             try {
                 const ff = await initFFmpeg();
 
-                updateProgressUI(28, 'جاري قراءة الفيديو في الذاكرة السريعة...', 2, 'يتم نقل المقطع المحدد إلى ذاكرة المعالجة الفورية...');
+                updateProgressUI(30, 'جاري قراءة الفيديو في ذاكرة المعالجة...', 2, `جاري نقل (${formatBytes(selectedFile.size)}) إلى نظام الملفات المؤقت...`);
 
-                // استخراج الامتداد الأصلي للحفاظ على الحاوية (Container)
                 const originalName = selectedFile.name;
                 const extMatch = originalName.match(/\.([a-zA-Z0-9]+)$/);
                 const ext = extMatch ? extMatch[1].toLowerCase() : 'mp4';
                 const inputFileName = `input.${ext}`;
                 let outputFileName = `output.${ext}`;
 
-                // كتابة الملف في نظام ملفات FFmpeg الافتراضي (MEMFS)
-                ff.FS('writeFile', inputFileName, await fetchFile(selectedFile));
+                // استخدام fetchFile من مكتبة @ffmpeg/util أو التحويل المباشر إلى Uint8Array
+                let fileData;
+                if (window.FFmpegUtil && window.FFmpegUtil.fetchFile) {
+                    fileData = await window.FFmpegUtil.fetchFile(selectedFile);
+                } else {
+                    const buf = await selectedFile.arrayBuffer();
+                    fileData = new Uint8Array(buf);
+                }
+
+                await ff.writeFile(inputFileName, fileData);
 
                 const ssStr = formatFFmpegTimestamp(startTime);
                 const durationStr = (endTime - startTime).toFixed(3);
@@ -865,18 +931,20 @@
                 let usedFallback = false;
 
                 try {
-                    // وضع -ss قبل -i يسرّع الوصول لنقطة البداية (Input Seeking) بشكل فوري
-                    await ff.run(
+                    const exitCode = await ff.exec([
                         '-ss', ssStr,
                         '-i', inputFileName,
                         '-t', durationStr,
                         '-c', 'copy',
                         '-avoid_negative_ts', 'make_zero',
                         outputFileName
-                    );
+                    ]);
 
-                    // التحقق من أن الملف الناتج سليم وليس فارغاً
-                    const checkData = ff.FS('readFile', outputFileName);
+                    if (exitCode !== 0) {
+                        throw new Error(`FFmpeg exited with code ${exitCode}`);
+                    }
+
+                    const checkData = await ff.readFile(outputFileName);
                     if (!checkData || checkData.length < 1024) {
                         throw new Error('Empty output from stream copy');
                     }
@@ -887,7 +955,7 @@
                         outputFileName = 'output_fast.mp4';
                         updateProgressUI(55, 'جاري القص بالترميز السريع (Ultrafast Fallback)...', 3, 'تم التبديل للترميز السريع لضمان توافق الصيغة وإطار البداية.');
                         
-                        await ff.run(
+                        const fallbackCode = await ff.exec([
                             '-ss', ssStr,
                             '-i', inputFileName,
                             '-t', durationStr,
@@ -896,7 +964,11 @@
                             '-crf', '22',
                             '-c:a', 'aac',
                             outputFileName
-                        );
+                        ]);
+
+                        if (fallbackCode !== 0) {
+                            throw new Error('فشل الترميز السريع أيضاً. قد يكون حجم الفيديو أكبر من سعة ذاكرة المتصفح.');
+                        }
                     } else {
                         throw new Error('فشل القص المباشر لهذه الصيغة. فعّل خيار "الترميز السريع" بالأسفل وأعد المحاولة.');
                     }
@@ -904,13 +976,13 @@
 
                 updateProgressUI(92, 'جاري تجهيز الملف ورابط التحميل المباشر...', 4, 'تنظيف الذاكرة المؤقتة وتوليد الفيديو النهائي...');
 
-                const data = ff.FS('readFile', outputFileName);
+                const data = await ff.readFile(outputFileName);
                 const mimeType = usedFallback ? 'video/mp4' : (selectedFile.type || 'video/mp4');
                 const blob = new Blob([data.buffer], { type: mimeType });
 
-                // تنظيف الملفات المؤقتة من الذاكرة
-                try { ff.FS('unlink', inputFileName); } catch (e) {}
-                try { ff.FS('unlink', outputFileName); } catch (e) {}
+                // تنظيف الملفات المؤقتة من الذاكرة لتحرير الرام
+                try { await ff.deleteFile(inputFileName); } catch (e) {}
+                try { await ff.deleteFile(outputFileName); } catch (e) {}
 
                 if (outputBlobUrl) URL.revokeObjectURL(outputBlobUrl);
                 outputBlobUrl = URL.createObjectURL(blob);
