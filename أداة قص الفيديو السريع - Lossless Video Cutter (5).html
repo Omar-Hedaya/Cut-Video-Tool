@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>قاصّ الفيديو الفوري | Lossless Video Cutter</title>
+    
+    <!-- تحميل Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- تحميل خط Noto Sans Arabic -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- تحميل محرك FFmpeg.wasm الإصدار 0.11.6 أحادي الخيط ليعمل بدون الحاجة لـ SharedArrayBuffer -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['"Noto Sans Arabic"', 'sans-serif'],
+                    },
+                    colors: {
+                        darkBg: '#090d16',
+                        cardBg: 'rgba(17, 24, 39, 0.72)',
+                        accent: '#3b82f6',
+                        accentHover: '#2563eb',
+                        emeraldGlow: '#10b981'
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            background-color: #090d16;
+            background-image: 
+                radial-gradient(at 15% 15%, rgba(59, 130, 246, 0.14) 0px, transparent 50%),
+                radial-gradient(at 85% 85%, rgba(16, 185, 129, 0.10) 0px, transparent 50%);
+            min-height: 100vh;
+            color: #f3f4f6;
+            overflow-x: hidden;
+        }
+
+        /* تأثير الزجاج الداكن */
+        .glass-panel {
+            background: rgba(17, 24, 39, 0.72);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6);
+        }
+
+        /* تنسيق شريط التمرير المزدوج (Dual Range Slider) */
+        .range-slider-container {
+            position: relative;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            direction: ltr; /* شريط الزمن يسير من اليسار لليمين كالمشغلات القياسية */
+        }
+
+        .slider-track-bg {
+            position: absolute;
+            width: 100%;
+            height: 8px;
+            background: #1f2937;
+            border-radius: 999px;
+            z-index: 1;
+        }
+
+        .slider-track-active {
+            position: absolute;
+            height: 8px;
+            background: linear-gradient(90deg, #3b82f6, #10b981);
+            border-radius: 999px;
+            z-index: 2;
+        }
+
+        .slider-playhead {
+            position: absolute;
+            width: 3px;
+            height: 22px;
+            background: #f59e0b;
+            border-radius: 2px;
+            z-index: 3;
+            pointer-events: none;
+            transform: translateX(-50%);
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.8);
+        }
+
+        input[type="range"].dual-range {
+            -webkit-appearance: none;
+            appearance: none;
+            position: absolute;
+            width: 100%;
+            height: 8px;
+            background: transparent;
+            pointer-events: none;
+            z-index: 4;
+            margin: 0;
+        }
+
+        input[type="range"].dual-range::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            pointer-events: auto;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: #ffffff;
+            border: 4px solid #3b82f6;
+            cursor: grab;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+            transition: transform 0.15s ease, border-color 0.15s ease;
+        }
+
+        input[type="range"].dual-range#endRange::-webkit-slider-thumb {
+            border-color: #10b981;
+        }
+
+        input[type="range"].dual-range::-webkit-slider-thumb:active {
+            cursor: grabbing;
+            transform: scale(1.18);
+        }
+
+        input[type="range"].dual-range::-moz-range-thumb {
+            pointer-events: auto;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: #ffffff;
+            border: 4px solid #3b82f6;
+            cursor: grab;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+        }
+
+        input[type="range"].dual-range#endRange::-moz-range-thumb {
+            border-color: #10b981;
+        }
+
+        /* حركة نبض خفيفة */
+        @keyframes pulseGlow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        .animate-pulse-slow {
+            animation: pulseGlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        /* خطوط متحركة لشريط التقدم */
+        @keyframes progressStripes {
+            0% { background-position: 28px 0; }
+            100% { background-position: 0 0; }
+        }
+        .progress-bar-striped {
+            background-image: linear-gradient(
+                45deg,
+                rgba(255, 255, 255, 0.18) 25%,
+                transparent 25%,
+                transparent 50%,
+                rgba(255, 255, 255, 0.18) 50%,
+                rgba(255, 255, 255, 0.18) 75%,
+                transparent 75%,
+                transparent
+            );
+            background-size: 28px 28px;
+            animation: progressStripes 0.8s linear infinite;
+        }
+    </style>
+</head>
+<body class="antialiased selection:bg-blue-500 selection:text-white">
+
+    <!-- حاوية الإشعارات المخصصة (بديل alert) -->
+    <div id="toastContainer" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[92%] max-w-md pointer-events-none"></div>
+
+    <!-- الشريط العلوي -->
+    <header class="border-b border-white/10 bg-gray-950/60 backdrop-blur-md sticky top-0 z-40">
+        <div class="max-w-5xl mx-auto px-4 py-3.5 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-emerald-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" />
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-lg sm:text-xl font-bold tracking-tight text-white">قاصّ الفيديو الفوري</h1>
+                    <p class="text-xs text-gray-400">قص مباشر بدون فقدان الجودة (Stream Copy)</p>
+                </div>
+            </div>
+
+            <!-- مؤشر حالة المحرك -->
+            <div id="engineStatusBadge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-900/90 border border-white/10 text-xs font-medium text-gray-300">
+                <span id="engineDot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse-slow"></span>
+                <span id="engineStatusText">المحرك جاهز عند الطلب</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- المحتوى الرئيسي -->
+    <main class="max-w-5xl mx-auto px-4 py-6 sm:py-8 space-y-6">
+
+        <!-- منطقة رفع / اختيار الفيديو -->
+        <section id="dropZoneSection" class="glass-panel rounded-3xl p-6 sm:p-10 transition-all duration-300 border-2 border-dashed border-white/15 hover:border-blue-500/60">
+            <label for="videoInput" id="dropZoneLabel" class="flex flex-col items-center justify-center text-center cursor-pointer select-none py-4">
+                <input type="file" id="videoInput" accept="video/*,.mp4,.mkv,.mov,.webm,.avi,.3gp" class="sr-only">
+                
+                <div class="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-center mb-4 text-blue-400 shadow-inner">
+                    <svg class="w-8 h-8 sm:w-10 sm:h-10" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                </div>
+
+                <h2 class="text-lg sm:text-2xl font-bold text-white mb-2">اختر ملف الفيديو من الاستوديو</h2>
+                <p class="text-sm text-gray-400 max-w-md mb-6 leading-relaxed">
+                    يدعم صيغ <span class="text-gray-200 font-medium">MP4, MOV, MKV, WebM, AVI</span>. تتم المعالجة بالكامل داخل متصفحك دون رفع الفيديو لأي سيرفر.
+                </p>
+
+                <span class="px-6 py-3.5 rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-sm sm:text-base shadow-lg shadow-blue-600/30 transition flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+                    </svg>
+                    <span>فتح الاستوديو واختيار فيديو</span>
+                </span>
+            </label>
+        </section>
+
+        <!-- شريط التقدم وحالة المعالجة (يظهر أثناء استيراد الفيديو وأثناء القص) -->
+        <div id="progressSection" class="hidden glass-panel rounded-3xl p-5 sm:p-6 space-y-4 border border-blue-500/30 shadow-lg shadow-blue-950/30">
+            <div class="flex items-center justify-between gap-3">
+                <div class="flex items-center gap-2.5">
+                    <span class="w-3 h-3 rounded-full bg-blue-500 animate-ping shrink-0"></span>
+                    <span id="progressStatusText" class="text-sm sm:text-base font-bold text-white">جاري تهيئة محرك القص...</span>
+                </div>
+                <span id="progressPercentText" class="font-mono text-base sm:text-lg font-extrabold text-emerald-400 bg-gray-950/80 px-3 py-1 rounded-xl border border-white/10">0%</span>
+            </div>
+
+            <!-- شريط التقدم الرئيسي -->
+            <div class="w-full h-4 bg-gray-900 rounded-full overflow-hidden p-0.5 border border-white/10 shadow-inner">
+                <div id="progressBarFill" class="h-full bg-gradient-to-r from-blue-500 via-cyan-400 to-emerald-400 progress-bar-striped rounded-full transition-all duration-300 ease-out" style="width: 0%;"></div>
+            </div>
+
+            <!-- خطوات التقدم المرحلية (4 مراحل) -->
+            <div class="grid grid-cols-4 gap-2 pt-1 text-center text-[11px] sm:text-xs font-medium">
+                <div id="step1Indicator" class="p-2 rounded-xl bg-gray-900/70 border border-white/5 text-gray-400 transition-colors">
+                    1. المحرك
+                </div>
+                <div id="step2Indicator" class="p-2 rounded-xl bg-gray-900/70 border border-white/5 text-gray-400 transition-colors">
+                    2. القراءة
+                </div>
+                <div id="step3Indicator" class="p-2 rounded-xl bg-gray-900/70 border border-white/5 text-gray-400 transition-colors">
+                    3. القص
+                </div>
+                <div id="step4Indicator" class="p-2 rounded-xl bg-gray-900/70 border border-white/5 text-gray-400 transition-colors">
+                    4. التصدير
+                </div>
+            </div>
+
+            <div class="flex items-center justify-between text-[11px] text-gray-400 pt-1 border-t border-white/5">
+                <span id="progressSubNote">تتم المعالجة محلياً في ذاكرة متصفحك بأقصى سرعة.</span>
+                <span id="progressElapsedTimer" class="font-mono text-gray-300">0.0 ث</span>
+            </div>
+        </div>
+
+        <!-- منطقة العمل والمحرر (تظهر بعد اختيار الفيديو) -->
+        <section id="editorSection" class="hidden space-y-6">
+            
+            <!-- شريط معلومات الملف -->
+            <div class="glass-panel rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                    </div>
+                    <div class="min-w-0">
+                        <p id="fileNameDisplay" class="text-sm font-bold text-white truncate">video.mp4</p>
+                        <div class="flex flex-wrap items-center gap-2 text-xs text-gray-400 mt-0.5">
+                            <span id="fileSizeDisplay">0 MB</span>
+                            <span>•</span>
+                            <span id="fileFormatDisplay" class="uppercase font-mono text-blue-400">MP4</span>
+                            <span>•</span>
+                            <span>المدة الكلية: <strong id="totalDurationDisplay" class="text-gray-200 font-mono">00:00.0</strong></span>
+                        </div>
+                    </div>
+                </div>
+
+                <label for="videoInput" id="changeFileBtn" class="cursor-pointer px-3.5 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium border border-white/10 transition">
+                    تغيير الفيديو
+                </label>
+            </div>
+
+            <!-- مشغل الفيديو -->
+            <div class="glass-panel rounded-3xl p-3 sm:p-5 space-y-4">
+                <div class="relative rounded-2xl overflow-hidden bg-black aspect-video flex items-center justify-center border border-white/5">
+                    <video id="videoPlayer" class="w-full h-full max-h-[58vh] object-contain" controls playsinline></video>
+                </div>
+
+                <!-- لوحة التحكم في القص والخط الزمني -->
+                <div class="bg-gray-900/80 rounded-2xl p-4 sm:p-5 border border-white/5 space-y-5">
+                    
+                    <!-- مؤشر الوقت الحالي وأزرار التعيين السريع -->
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-2 text-xs sm:text-sm bg-gray-950/70 px-3.5 py-2 rounded-xl border border-white/5">
+                            <span class="text-gray-400">موضع التشغيل:</span>
+                            <span id="currentTimeDisplay" class="font-mono font-bold text-amber-400">00:00.00</span>
+                        </div>
+
+                        <div class="flex flex-wrap items-center gap-2">
+                            <button type="button" id="setStartNowBtn" class="px-3 py-2 rounded-xl bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/30 text-xs font-semibold transition active:scale-95 flex items-center gap-1.5">
+                                <span>[ تعيين البداية هنا</span>
+                            </button>
+                            <button type="button" id="setEndNowBtn" class="px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition active:scale-95 flex items-center gap-1.5">
+                                <span>تعيين النهاية هنا ]</span>
+                            </button>
+                            <button type="button" id="previewClipBtn" class="px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold transition active:scale-95 flex items-center gap-1.5">
+                                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
+                                <span>معاينة المقطع</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- شريط التحديد المزدوج (Dual Range Timeline Slider) -->
+                    <div class="space-y-2 pt-1">
+                        <div class="flex justify-between text-[11px] text-gray-400 font-mono px-1" dir="ltr">
+                            <span>00:00.0</span>
+                            <span class="text-gray-500">اسحب المقبض الأزرق للبداية والأخضر للنهاية</span>
+                            <span id="sliderMaxLabel">00:00.0</span>
+                        </div>
+                        
+                        <div class="range-slider-container px-1" id="sliderContainer">
+                            <div class="slider-track-bg"></div>
+                            <div id="sliderActiveTrack" class="slider-track-active" style="left: 0%; width: 100%;"></div>
+                            <div id="sliderPlayhead" class="slider-playhead" style="left: 0%;"></div>
+                            <input type="range" id="startRange" class="dual-range" min="0" max="100" step="0.01" value="0">
+                            <input type="range" id="endRange" class="dual-range" min="0" max="100" step="0.01" value="100">
+                        </div>
+                    </div>
+
+                    <!-- حقول الإدخال الدقيقة للبداية والنهاية والمدة المقصوصة -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                        <!-- وقت البداية -->
+                        <div class="bg-gray-950/60 p-3 rounded-xl border border-blue-500/20 flex items-center justify-between">
+                            <div>
+                                <label for="startInput" class="block text-xs text-blue-400 font-semibold mb-1">وقت البداية (ثانية)</label>
+                                <input type="number" id="startInput" step="0.01" min="0" value="0.00" class="w-28 bg-gray-900 text-white font-mono text-sm px-2.5 py-1.5 rounded-lg border border-white/10 focus:outline-none focus:border-blue-500" dir="ltr">
+                            </div>
+                            <span id="startFormatted" class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded-md">00:00.00</span>
+                        </div>
+
+                        <!-- وقت النهاية -->
+                        <div class="bg-gray-950/60 p-3 rounded-xl border border-emerald-500/20 flex items-center justify-between">
+                            <div>
+                                <label for="endInput" class="block text-xs text-emerald-400 font-semibold mb-1">وقت النهاية (ثانية)</label>
+                                <input type="number" id="endInput" step="0.01" min="0" value="0.00" class="w-28 bg-gray-900 text-white font-mono text-sm px-2.5 py-1.5 rounded-lg border border-white/10 focus:outline-none focus:border-emerald-500" dir="ltr">
+                            </div>
+                            <span id="endFormatted" class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded-md">00:00.00</span>
+                        </div>
+
+                        <!-- مدة المقطع الناتج -->
+                        <div class="bg-gradient-to-br from-blue-950/40 to-emerald-950/40 p-3 rounded-xl border border-white/10 flex items-center justify-between">
+                            <div>
+                                <span class="block text-xs text-gray-300 font-semibold mb-1">مدة المقطع الناتج</span>
+                                <span id="clipDurationDisplay" class="font-mono text-base font-bold text-white">00:00.00</span>
+                            </div>
+                            <div class="text-left">
+                                <span class="block text-[11px] text-gray-400">الحجم التقريبي</span>
+                                <span id="estimatedSizeDisplay" class="font-mono text-xs text-emerald-400 font-semibold">~ 0 MB</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- خيارات وضع القص وزر التنفيذ -->
+                    <div class="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border-t border-white/10">
+                        <div class="flex items-center gap-3">
+                            <label class="flex items-center gap-2 cursor-pointer text-xs sm:text-sm text-gray-300 select-none">
+                                <input type="checkbox" id="fallbackEncodeCheckbox" class="w-4 h-4 rounded accent-blue-500 bg-gray-800 border-gray-600">
+                                <span>تفعيل الترميز السريع (Ultrafast) إذا فشل القص المباشر</span>
+                            </label>
+                        </div>
+
+                        <button type="button" id="cutBtn" class="px-7 py-3.5 rounded-2xl bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 text-white font-bold text-sm sm:text-base shadow-xl shadow-emerald-900/20 transition transform active:scale-95 flex items-center justify-center gap-2.5">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                            <span>قص وتصدير الفيديو فوراً</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- قسم النتيجة والتحميل المباشر -->
+            <div id="resultSection" class="hidden glass-panel rounded-3xl p-5 sm:p-6 border border-emerald-500/40 bg-emerald-950/15 space-y-5">
+                <div class="flex flex-wrap items-center justify-between gap-4">
+                    <div class="flex items-center gap-3.5">
+                        <div class="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                            <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                        </div>
+                        <div>
+                            <h3 class="text-base sm:text-lg font-bold text-white">تم قص الفيديو وتصديره بنجاح!</h3>
+                            <div class="flex flex-wrap items-center gap-3 text-xs text-gray-300 mt-1">
+                                <span class="bg-gray-900/90 px-2.5 py-1 rounded-lg border border-white/10">
+                                    الحجم الناتج: <strong id="outputSizeDisplay" class="text-emerald-400 font-mono">0 MB</strong>
+                                </span>
+                                <span class="bg-gray-900/90 px-2.5 py-1 rounded-lg border border-white/10">
+                                    زمن التنفيذ: <strong id="executionTimeDisplay" class="text-blue-400 font-mono">0 ms</strong>
+                                </span>
+                                <span id="cutModeUsedBadge" class="bg-emerald-500/15 text-emerald-300 px-2.5 py-1 rounded-lg border border-emerald-500/20 font-medium">
+                                    Stream Copy (بدون فقدان جودة)
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <a id="downloadLink" href="#" download="trimmed_video.mp4" class="w-full sm:w-auto px-6 py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm shadow-lg shadow-emerald-600/30 transition active:scale-95 flex items-center justify-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        <span>تحميل الفيديو المقصوص</span>
+                    </a>
+                </div>
+
+                <!-- مشغل معاينة النتيجة -->
+                <div class="rounded-2xl overflow-hidden bg-black border border-white/10">
+                    <video id="outputVideoPlayer" class="w-full max-h-[42vh] object-contain" controls playsinline></video>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- بطاقات المميزات السريعة -->
+        <section class="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+            <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+                <div class="text-blue-400 font-bold text-sm flex items-center gap-2">
+                    <span>⚡ سرعة البرق (Stream Copy)</span>
+                </div>
+                <p class="text-xs text-gray-400 leading-relaxed">ينسخ بيانات الفيديو والصوت مباشرة دون إعادة الترميز، مما ينجز القص في أجزاء من الثانية.</p>
+            </div>
+            <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+                <div class="text-emerald-400 font-bold text-sm flex items-center gap-2">
+                    <span>🔒 خصوصية كاملة 100%</span>
+                </div>
+                <p class="text-xs text-gray-400 leading-relaxed">تتم المعالجة بالكامل داخل ذاكرة متصفحك (WebAssembly) ولا يتم رفع أي بايت إلى الإنترنت.</p>
+            </div>
+            <div class="glass-panel rounded-2xl p-4 space-y-1.5">
+                <div class="text-amber-400 font-bold text-sm flex items-center gap-2">
+                    <span>🎯 دقة متناهية</span>
+                </div>
+                <p class="text-xs text-gray-400 leading-relaxed">تحكم مزدوج بالخط الزمني مع إمكانية التقاط لحظة البداية والنهاية أثناء التشغيل الفعلي.</p>
+            </div>
+        </section>
+
+    </main>
+
+    <script>
+        // =========================================================================
+        // 1. تعريف عناصر الواجهة والمتغيرات العامة
+        // =========================================================================
+        const { createFFmpeg, fetchFile } = FFmpeg;
+        let ffmpeg = null;
+        let isFFmpegLoaded = false;
+        let selectedFile = null;
+        let videoDuration = 0;
+        let startTime = 0;
+        let endTime = 0;
+        let isPreviewingClip = false;
+        let outputBlobUrl = null;
+        let progressTimerInterval = null;
+
+        const dropZoneSection = document.getElementById('dropZoneSection');
+        const videoInput = document.getElementById('videoInput');
+        const editorSection = document.getElementById('editorSection');
+        const videoPlayer = document.getElementById('videoPlayer');
+        const fileNameDisplay = document.getElementById('fileNameDisplay');
+        const fileSizeDisplay = document.getElementById('fileSizeDisplay');
+        const fileFormatDisplay = document.getElementById('fileFormatDisplay');
+        const totalDurationDisplay = document.getElementById('totalDurationDisplay');
+        const currentTimeDisplay = document.getElementById('currentTimeDisplay');
+        const sliderMaxLabel = document.getElementById('sliderMaxLabel');
+        const sliderActiveTrack = document.getElementById('sliderActiveTrack');
+        const sliderPlayhead = document.getElementById('sliderPlayhead');
+        const startRange = document.getElementById('startRange');
+        const endRange = document.getElementById('endRange');
+        const startInput = document.getElementById('startInput');
+        const endInput = document.getElementById('endInput');
+        const startFormatted = document.getElementById('startFormatted');
+        const endFormatted = document.getElementById('endFormatted');
+        const clipDurationDisplay = document.getElementById('clipDurationDisplay');
+        const estimatedSizeDisplay = document.getElementById('estimatedSizeDisplay');
+        const setStartNowBtn = document.getElementById('setStartNowBtn');
+        const setEndNowBtn = document.getElementById('setEndNowBtn');
+        const previewClipBtn = document.getElementById('previewClipBtn');
+        const fallbackEncodeCheckbox = document.getElementById('fallbackEncodeCheckbox');
+        const cutBtn = document.getElementById('cutBtn');
+
+        const engineDot = document.getElementById('engineDot');
+        const engineStatusText = document.getElementById('engineStatusText');
+        const progressSection = document.getElementById('progressSection');
+        const progressStatusText = document.getElementById('progressStatusText');
+        const progressPercentText = document.getElementById('progressPercentText');
+        const progressBarFill = document.getElementById('progressBarFill');
+        const progressSubNote = document.getElementById('progressSubNote');
+        const progressElapsedTimer = document.getElementById('progressElapsedTimer');
+        const stepIndicators = [
+            document.getElementById('step1Indicator'),
+            document.getElementById('step2Indicator'),
+            document.getElementById('step3Indicator'),
+            document.getElementById('step4Indicator')
+        ];
+
+        const resultSection = document.getElementById('resultSection');
+        const outputSizeDisplay = document.getElementById('outputSizeDisplay');
+        const executionTimeDisplay = document.getElementById('executionTimeDisplay');
+        const cutModeUsedBadge = document.getElementById('cutModeUsedBadge');
+        const downloadLink = document.getElementById('downloadLink');
+        const outputVideoPlayer = document.getElementById('outputVideoPlayer');
+
+        // =========================================================================
+        // 2. دوال مساعدة (تنسيق الوقت، الإشعارات، شريط التقدم)
+        // =========================================================================
+        function updateProgressUI(percent, statusMsg, activeStep, subNote) {
+            const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+            progressBarFill.style.width = `${clamped}%`;
+            progressPercentText.textContent = `${clamped}%`;
+            if (statusMsg) progressStatusText.textContent = statusMsg;
+            if (subNote) progressSubNote.textContent = subNote;
+
+            if (activeStep) {
+                stepIndicators.forEach((el, idx) => {
+                    const stepNum = idx + 1;
+                    if (stepNum < activeStep) {
+                        el.className = 'p-2 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold transition-colors';
+                    } else if (stepNum === activeStep) {
+                        el.className = 'p-2 rounded-xl bg-blue-500/25 border border-blue-400/50 text-white font-bold animate-pulse transition-colors';
+                    } else {
+                        el.className = 'p-2 rounded-xl bg-gray-900/70 border border-white/5 text-gray-400 transition-colors';
+                    }
+                });
+            }
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            
+            let colors = 'bg-gray-900/95 border-blue-500/40 text-blue-100';
+            if (type === 'error') colors = 'bg-red-950/95 border-red-500/50 text-red-100';
+            if (type === 'success') colors = 'bg-emerald-950/95 border-emerald-500/50 text-emerald-100';
+
+            toast.className = `pointer-events-auto px-4 py-3 rounded-2xl border shadow-2xl backdrop-blur-md text-xs sm:text-sm font-medium flex items-center justify-between gap-3 transition-all duration-300 ${colors}`;
+            toast.innerHTML = `<span>${message}</span>`;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(-10px)';
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes === 0) return '0 MB';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatTime(seconds) {
+            if (!isFinite(seconds) || seconds < 0) seconds = 0;
+            const hrs = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            const ms = Math.floor((seconds % 1) * 100);
+            
+            const pad = (n) => String(n).padStart(2, '0');
+            if (hrs > 0) {
+                return `${pad(hrs)}:${pad(mins)}:${pad(secs)}.${pad(ms)}`;
+            }
+            return `${pad(mins)}:${pad(secs)}.${pad(ms)}`;
+        }
+
+        function formatFFmpegTimestamp(seconds) {
+            const hrs = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = (seconds % 60).toFixed(3);
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${pad(hrs)}:${pad(mins)}:${secs.padStart(6, '0')}`;
+        }
+
+        function startElapsedTimer(startPerf) {
+            stopElapsedTimer();
+            progressElapsedTimer.textContent = '0.0 ث';
+            progressTimerInterval = setInterval(() => {
+                const sec = ((performance.now() - startPerf) / 1000).toFixed(1);
+                progressElapsedTimer.textContent = `${sec} ث`;
+            }, 100);
+        }
+
+        function stopElapsedTimer() {
+            if (progressTimerInterval) {
+                clearInterval(progressTimerInterval);
+                progressTimerInterval = null;
+            }
+        }
+
+        // =========================================================================
+        // 3. إدارة اختيار الملف والخط الزمني (Timeline)
+        // =========================================================================
+        videoInput.addEventListener('change', (e) => {
+            if (e.target.files && e.target.files[0]) {
+                handleVideoFileSelect(e.target.files[0]);
+            }
+        });
+
+        dropZoneSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZoneSection.classList.add('border-blue-500', 'bg-blue-500/5');
+        });
+
+        dropZoneSection.addEventListener('dragleave', () => {
+            dropZoneSection.classList.remove('border-blue-500', 'bg-blue-500/5');
+        });
+
+        dropZoneSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZoneSection.classList.remove('border-blue-500', 'bg-blue-500/5');
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                handleVideoFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+
+        function handleVideoFileSelect(file) {
+            if (!file) return;
+            selectedFile = file;
+
+            if (outputBlobUrl) {
+                URL.revokeObjectURL(outputBlobUrl);
+                outputBlobUrl = null;
+            }
+            resultSection.classList.add('hidden');
+            editorSection.classList.add('hidden');
+
+            // إظهار شريط التقدم فوراً أثناء استيراد وقراءة بيانات الفيديو في المتصفح
+            const loadStartPerf = performance.now();
+            startElapsedTimer(loadStartPerf);
+            progressSection.classList.remove('hidden');
+            updateProgressUI(20, 'جاري قراءة واستيراد ملف الفيديو إلى المتصفح...', 2, `الملف: ${file.name} (${formatBytes(file.size)})`);
+
+            setTimeout(() => {
+                updateProgressUI(65, 'جاري تحليل بيانات الفيديو والإطارات الزمنية...', 2);
+            }, 120);
+
+            const fileUrl = URL.createObjectURL(file);
+            videoPlayer.src = fileUrl;
+
+            fileNameDisplay.textContent = file.name;
+            fileSizeDisplay.textContent = formatBytes(file.size);
+            const extMatch = file.name.match(/\.([a-zA-Z0-9]+)$/);
+            fileFormatDisplay.textContent = extMatch ? extMatch[1].toUpperCase() : 'VIDEO';
+        }
+
+        function updateRangeUI() {
+            if (!videoDuration || videoDuration <= 0) return;
+            const startPct = (startTime / videoDuration) * 100;
+            const endPct = (endTime / videoDuration) * 100;
+
+            sliderActiveTrack.style.left = `${startPct}%`;
+            sliderActiveTrack.style.width = `${Math.max(0, endPct - startPct)}%`;
+
+            startInput.value = startTime.toFixed(2);
+            endInput.value = endTime.toFixed(2);
+            startFormatted.textContent = formatTime(startTime);
+            endFormatted.textContent = formatTime(endTime);
+
+            const clipDur = Math.max(0, endTime - startTime);
+            clipDurationDisplay.textContent = formatTime(clipDur);
+
+            if (selectedFile && videoDuration > 0) {
+                const estBytes = (clipDur / videoDuration) * selectedFile.size;
+                estimatedSizeDisplay.textContent = `~ ${formatBytes(estBytes)}`;
+            }
+        }
+
+        startRange.addEventListener('input', () => {
+            let val = parseFloat(startRange.value);
+            if (val >= endTime - 0.1) {
+                val = Math.max(0, endTime - 0.1);
+                startRange.value = val;
+            }
+            startTime = val;
+            videoPlayer.currentTime = startTime;
+            updateRangeUI();
+        });
+
+        endRange.addEventListener('input', () => {
+            let val = parseFloat(endRange.value);
+            if (val <= startTime + 0.1) {
+                val = Math.min(videoDuration, startTime + 0.1);
+                endRange.value = val;
+            }
+            endTime = val;
+            videoPlayer.currentTime = endTime;
+            updateRangeUI();
+        });
+
+        startInput.addEventListener('change', () => {
+            let val = parseFloat(startInput.value) || 0;
+            val = Math.max(0, Math.min(val, endTime - 0.1));
+            startTime = val;
+            startRange.value = val;
+            videoPlayer.currentTime = startTime;
+            updateRangeUI();
+        });
+
+        endInput.addEventListener('change', () => {
+            let val = parseFloat(endInput.value) || 0;
+            val = Math.min(videoDuration, Math.max(val, startTime + 0.1));
+            endTime = val;
+            endRange.value = val;
+            videoPlayer.currentTime = endTime;
+            updateRangeUI();
+        });
+
+        setStartNowBtn.addEventListener('click', () => {
+            const cur = videoPlayer.currentTime;
+            if (cur < endTime - 0.05) {
+                startTime = cur;
+                startRange.value = cur;
+                updateRangeUI();
+                showToast(`تم تعيين البداية عند ${formatTime(startTime)}`, 'info');
+            } else {
+                showToast('وقت البداية يجب أن يكون قبل وقت النهاية.', 'error');
+            }
+        });
+
+        setEndNowBtn.addEventListener('click', () => {
+            const cur = videoPlayer.currentTime;
+            if (cur > startTime + 0.05) {
+                endTime = cur;
+                endRange.value = cur;
+                updateRangeUI();
+                showToast(`تم تعيين النهاية عند ${formatTime(endTime)}`, 'info');
+            } else {
+                showToast('وقت النهاية يجب أن يكون بعد وقت البداية.', 'error');
+            }
+        });
+
+        videoPlayer.addEventListener('timeupdate', () => {
+            const cur = videoPlayer.currentTime;
+            currentTimeDisplay.textContent = formatTime(cur);
+            if (videoDuration > 0) {
+                sliderPlayhead.style.left = `${(cur / videoDuration) * 100}%`;
+            }
+            if (isPreviewingClip && cur >= endTime) {
+                videoPlayer.pause();
+                isPreviewingClip = false;
+            }
+        });
+
+        videoPlayer.addEventListener('pause', () => {
+            isPreviewingClip = false;
+        });
+
+        videoPlayer.addEventListener('error', () => {
+            stopElapsedTimer();
+            progressSection.classList.add('hidden');
+            showToast('تعذر قراءة ملف الفيديو في المتصفح. جرب صيغة MP4.', 'error');
+        });
+// ... existing code ... -->
+        previewClipBtn.addEventListener('click', () => {
+            videoPlayer.currentTime = startTime;
+            isPreviewingClip = true;
+            videoPlayer.play();
+        });
+
+        function startElapsedTimer(startPerf) {
+// ... existing code ... -->
+        async function initFFmpeg() {
+            if (isFFmpegLoaded && ffmpeg) return ffmpeg;
+
+            try {
+                engineDot.className = 'w-2.5 h-2.5 rounded-full bg-blue-400 animate-ping';
+                engineStatusText.textContent = 'جاري تحميل محرك القص...';
+                
+                progressSection.classList.remove('hidden');
+                updateProgressUI(12, 'جاري تحميل نواة FFmpeg.wasm في المتصفح...', 1, 'يتم تحميل المحرك (~25MB) في أول استخدام فقط وتخزينه في المتصفح.');
+
+                ffmpeg = createFFmpeg({
+                    log: false,
+                    corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
+                    mainName: 'main',
+                    progress: ({ ratio }) => {
+                        if (ratio >= 0 && ratio <= 1) {
+                            // ربط تقدم FFmpeg الفعلي بالمرحلة الثالثة (من 50% إلى 90%)
+                            const mappedPct = 50 + Math.round(ratio * 40);
+                            updateProgressUI(mappedPct, null, 3);
+                        }
+                    }
+                });
+
+                await ffmpeg.load();
+                isFFmpegLoaded = true;
+
+                engineDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400';
+                engineStatusText.textContent = 'المحرك نشط وجاهز';
+                return ffmpeg;
+            } catch (err) {
+                console.error('FFmpeg load error:', err);
+                engineDot.className = 'w-2.5 h-2.5 rounded-full bg-red-500';
+                engineStatusText.textContent = 'فشل تحميل المحرك';
+                throw new Error('تعذر تحميل محرك FFmpeg. تأكد من اتصالك بالإنترنت وأعد المحاولة.');
+            }
+        }
+
+        // =========================================================================
+        // 4. تنفيذ عملية القص والتصدير السريع
+        // =========================================================================
+        cutBtn.addEventListener('click', async () => {
+            if (!selectedFile) {
+                showToast('يرجى اختيار ملف فيديو أولاً.', 'error');
+                return;
+            }
+            if (endTime <= startTime) {
+                showToast('يجب أن يكون وقت النهاية أكبر من وقت البداية.', 'error');
+                return;
+            }
+
+            cutBtn.disabled = true;
+            cutBtn.classList.add('opacity-60', 'cursor-not-allowed');
+            resultSection.classList.add('hidden');
+            progressSection.classList.remove('hidden');
+
+            const startPerf = performance.now();
+            startElapsedTimer(startPerf);
+            updateProgressUI(5, 'جاري التحقق من جاهزية محرك القص...', 1);
+
+            try {
+                const ff = await initFFmpeg();
+
+                updateProgressUI(28, 'جاري قراءة الفيديو في الذاكرة السريعة...', 2, 'يتم نقل المقطع المحدد إلى ذاكرة المعالجة الفورية...');
+
+                // استخراج الامتداد الأصلي للحفاظ على الحاوية (Container)
+                const originalName = selectedFile.name;
+                const extMatch = originalName.match(/\.([a-zA-Z0-9]+)$/);
+                const ext = extMatch ? extMatch[1].toLowerCase() : 'mp4';
+                const inputFileName = `input.${ext}`;
+                let outputFileName = `output.${ext}`;
+
+                // كتابة الملف في نظام ملفات FFmpeg الافتراضي (MEMFS)
+                ff.FS('writeFile', inputFileName, await fetchFile(selectedFile));
+
+                const ssStr = formatFFmpegTimestamp(startTime);
+                const durationStr = (endTime - startTime).toFixed(3);
+
+                updateProgressUI(52, 'جاري قص الفيديو مباشرة بدون فقدان الجودة (Stream Copy)...', 3, 'نسخ مباشر للإطارات دون إعادة ترميز...');
+
+                let usedFallback = false;
+
+                try {
+                    // وضع -ss قبل -i يسرّع الوصول لنقطة البداية (Input Seeking) بشكل فوري
+                    await ff.run(
+                        '-ss', ssStr,
+                        '-i', inputFileName,
+                        '-t', durationStr,
+                        '-c', 'copy',
+                        '-avoid_negative_ts', 'make_zero',
+                        outputFileName
+                    );
+
+                    // التحقق من أن الملف الناتج سليم وليس فارغاً
+                    const checkData = ff.FS('readFile', outputFileName);
+                    if (!checkData || checkData.length < 1024) {
+                        throw new Error('Empty output from stream copy');
+                    }
+                } catch (copyError) {
+                    console.warn('Stream copy issue:', copyError);
+                    if (fallbackEncodeCheckbox.checked) {
+                        usedFallback = true;
+                        outputFileName = 'output_fast.mp4';
+                        updateProgressUI(55, 'جاري القص بالترميز السريع (Ultrafast Fallback)...', 3, 'تم التبديل للترميز السريع لضمان توافق الصيغة وإطار البداية.');
+                        
+                        await ff.run(
+                            '-ss', ssStr,
+                            '-i', inputFileName,
+                            '-t', durationStr,
+                            '-c:v', 'libx264',
+                            '-preset', 'ultrafast',
+                            '-crf', '22',
+                            '-c:a', 'aac',
+                            outputFileName
+                        );
+                    } else {
+                        throw new Error('فشل القص المباشر لهذه الصيغة. فعّل خيار "الترميز السريع" بالأسفل وأعد المحاولة.');
+                    }
+                }
+
+                updateProgressUI(92, 'جاري تجهيز الملف ورابط التحميل المباشر...', 4, 'تنظيف الذاكرة المؤقتة وتوليد الفيديو النهائي...');
+
+                const data = ff.FS('readFile', outputFileName);
+                const mimeType = usedFallback ? 'video/mp4' : (selectedFile.type || 'video/mp4');
+                const blob = new Blob([data.buffer], { type: mimeType });
+
+                // تنظيف الملفات المؤقتة من الذاكرة
+                try { ff.FS('unlink', inputFileName); } catch (e) {}
+                try { ff.FS('unlink', outputFileName); } catch (e) {}
+
+                if (outputBlobUrl) URL.revokeObjectURL(outputBlobUrl);
+                outputBlobUrl = URL.createObjectURL(blob);
+
+                const elapsedMs = performance.now() - startPerf;
+                const elapsedText = elapsedMs < 1000 ? `${Math.round(elapsedMs)} مللي ثانية` : `${(elapsedMs / 1000).toFixed(2)} ثانية`;
+
+                const baseName = originalName.replace(/\.[^/.]+$/, '');
+                const finalExt = usedFallback ? 'mp4' : ext;
+                downloadLink.href = outputBlobUrl;
+                downloadLink.download = `${baseName}_cut.${finalExt}`;
+
+                outputVideoPlayer.src = outputBlobUrl;
+                outputSizeDisplay.textContent = formatBytes(blob.size);
+                executionTimeDisplay.textContent = elapsedText;
+
+                if (usedFallback) {
+                    cutModeUsedBadge.textContent = 'Ultrafast Encode (متوافق 100%)';
+                    cutModeUsedBadge.className = 'bg-blue-500/15 text-blue-300 px-2.5 py-1 rounded-lg border border-blue-500/20 font-medium';
+                } else {
+                    cutModeUsedBadge.textContent = 'Stream Copy (بدون فقدان جودة)';
+                    cutModeUsedBadge.className = 'bg-emerald-500/15 text-emerald-300 px-2.5 py-1 rounded-lg border border-emerald-500/20 font-medium';
+                }
+
+                stopElapsedTimer();
+                updateProgressUI(100, 'اكتملت عملية القص بنجاح!', 5, `استغرقت العملية ${elapsedText} فقط.`);
+
+                setTimeout(() => {
+                    progressSection.classList.add('hidden');
+                    resultSection.classList.remove('hidden');
+                    resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    showToast(`تم القص بنجاح في ${elapsedText}!`, 'success');
+                }, 450);
+
+            } catch (error) {
+                console.error(error);
+                stopElapsedTimer();
+                progressSection.classList.add('hidden');
+                showToast(error.message || 'حدث خطأ أثناء معالجة الفيديو.', 'error');
+            } finally {
+                cutBtn.disabled = false;
+                cutBtn.classList.remove('opacity-60', 'cursor-not-allowed');
+            }
+        });
+    </script>
+</body>
+</html>
